@@ -10,10 +10,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from assignment.task import Task
 from assignment.env import Environment
-from assignment.eval.instances import Instance, published_images
-from assignment.utils.image import build_testbed_image
+from assignment.eval.instances import published_images
+from assignment.sandbox import DockerSandboxConfig, ModalSandboxConfig
+from assignment.task import Task
+from assignment.utils.image import ImageSpec, build_testbed_image
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class EvaluationSpec:
     cwd: str = TESTBED
 
     @classmethod
-    def load(cls, path: str | Path) -> "EvaluationSpec":
+    def load(cls, path: str | Path) -> EvaluationSpec:
         """Load ``evaluation.json`` and its sibling test patch."""
 
         path = Path(path).resolve()
@@ -276,7 +277,7 @@ def _grade(
     }
     return report
 
-def resolve_image(spec, task: Task | None, strict: bool):
+def resolve_image(spec, task: Task | None, strict: bool) -> ImageSpec | str:
     """The image to grade in: published when one exists, otherwise built.
 
     Args:
@@ -285,7 +286,7 @@ def resolve_image(spec, task: Task | None, strict: bool):
         strict: Passed to the build; refuses a checkout off the base commit.
 
     Returns:
-        A published image name, or a `modal.Image` built from the task.
+        A published image name, or the recipe to build the task's testbed.
 
     Raises:
         ValueError: If no image is published and no task was given to build.
@@ -307,6 +308,7 @@ def evaluate(
     task: Task | None = None,
     timeout: float = 600,
     strict: bool = True,
+    backend: str | ModalSandboxConfig | DockerSandboxConfig | None = None,
 ) -> Report:
     """Build or fetch the testbed, apply a candidate patch, and grade it.
 
@@ -332,6 +334,7 @@ def evaluate(
         timeout: Seconds allowed for the test command.
         strict: Refuse to build when the local checkout does not match the
             task's base commit, which would silently invalidate the result.
+        backend: The sandbox backend; see `Environment`.
 
     Returns:
         A report. Failures to apply a patch or to run the tests are recorded in
@@ -347,7 +350,9 @@ def evaluate(
     report = Report(task_id=spec.task_id, patch_applied=patch is None)
     image = resolve_image(spec, task, strict)
 
-    with Environment(image=image, cwd=spec.cwd, runtime_timeout=timeout) as env:
+    with Environment(
+        image=image, cwd=spec.cwd, runtime_timeout=timeout, backend=backend
+    ) as env:
         # Only substituted when the command asks for it, so a spec that names
         # its own interpreter keeps it.
         test_cmd = spec.test_cmd

@@ -1,4 +1,4 @@
-"""Run the chess server in a Modal sandbox and play moves against it.
+"""Run the chess server in a sandbox and play moves against it.
 
 This is the part 2 surface. It does not know anything about fixing the bug: it
 takes an optional patch (the fix produced in part 1), applies it to the
@@ -8,17 +8,18 @@ testbed, serves the app, and exposes the game over HTTP.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import time
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import httpx
 
 from assignment.agent.chess_tools import CHESS_PORT
-from assignment.task import Task
 from assignment.env import Environment
+from assignment.sandbox import DockerSandboxConfig, ModalSandboxConfig
+from assignment.task import Task
 from assignment.utils.image import build_testbed_image
 
 TESTBED = "/testbed"
@@ -36,19 +37,8 @@ SANDBOX_FILES = (
     Path(__file__).with_name("sandbox_python.py"),
 )
 
-def _with_assignment_files(image):
-    """Copy the files the sandbox runs into /opt/assignment."""
-
-    for source in SANDBOX_FILES:
-        image = image.add_local_file(
-            str(source),
-            f"/opt/assignment/{source.name}",
-            copy=True,  # SWE-ReX adds its runtime build layer afterwards.
-        )
-    return image
-
 class ChessSandbox(Environment):
-    """A chess server hosted in an isolated Modal sandbox.
+    """A chess server hosted in an isolated sandbox (Modal or Docker).
 
     Built from the same testbed image the evaluation harness uses, so the code
     under test and the code being played are identical. Without a patch the
@@ -66,6 +56,7 @@ class ChessSandbox(Environment):
         runtime_timeout: float = 600,
         deployment_timeout: float = 1800,
         server_timeout: float = 30,
+        backend: str | ModalSandboxConfig | DockerSandboxConfig | None = None,
     ):
         """Launch the sandbox and block until the server answers.
 
@@ -74,13 +65,15 @@ class ChessSandbox(Environment):
                 `Task`. Defaults to the chess task.
             patch: A unified diff applied to the testbed before the server
                 starts, normally the fix from part 1.
-            port: Port to serve on, forwarded through an encrypted tunnel.
+            port: Port to serve on, forwarded to this machine (through an
+                encrypted tunnel on Modal, on 127.0.0.1 on Docker).
             strict: Refuse to build when the local checkout does not match the
                 task's base commit.
             startup_timeout: Seconds to wait for the SWE-ReX runtime.
             runtime_timeout: Seconds a single command may run.
             deployment_timeout: Seconds the sandbox may stay alive.
             server_timeout: Seconds to wait for `/health` to succeed.
+            backend: The sandbox backend; see `Environment`.
         """
         if not 1 <= port <= 65535:
             raise ValueError(f"Invalid port: {port}")
@@ -90,18 +83,23 @@ class ChessSandbox(Environment):
         self.server_url = ""
         self._client: httpx.Client | None = None
 
+        # The files the sandbox runs, copied into /opt/assignment.
+        image = build_testbed_image(self.task, strict=strict).with_files(
+            {source: f"/opt/assignment/{source.name}" for source in SANDBOX_FILES}
+        )
         super().__init__(
-            image=_with_assignment_files(build_testbed_image(self.task, strict=strict)),
+            image=image,
             startup_timeout=startup_timeout,
             runtime_timeout=runtime_timeout,
             deployment_timeout=deployment_timeout,
-            modal_sandbox_kwargs={"encrypted_ports": [port]},
+            backend=backend,
+            exposed_ports=[port],
         )
 
         try:
             if patch is not None:
                 self._apply_patch(patch)
-            self.server_url = self.tunnel_url(port).rstrip("/")
+            self.server_url = self.port_url(port).rstrip("/")
             self._start_server(server_timeout)
             self._client = httpx.Client(base_url=self.server_url, timeout=30)
         except Exception:
@@ -145,7 +143,9 @@ class ChessSandbox(Environment):
                 if response.status == 200 and payload == {"status": "ok"}:
                     return
                 last_error = f"unexpected health response: {payload!r}"
-            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            # OSError covers URLError, HTTPError, timeouts, and the reset Docker's
+            # port proxy sends while nothing listens behind it yet.
+            except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
                 last_error = str(exc)
             time.sleep(0.25)
 
@@ -208,14 +208,16 @@ def main() -> None:
     """Launch a chess sandbox and keep it alive until the user exits."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Serve the chess app from a Modal sandbox")
+    parser = argparse.ArgumentParser(
+        description="Serve the chess app from a sandbox (SANDBOX=modal|docker picks where)"
+    )
     parser.add_argument("--patch", type=Path, help="Fix to apply before serving, e.g. the part 1 output")
     parser.add_argument("--task", type=Path, help="Task directory to serve the testbed of")
     parser.add_argument(
         "--sandbox-timeout",
         type=int,
         default=1800,
-        help="maximum lifetime of the Modal sandbox in seconds",
+        help="maximum lifetime of the sandbox in seconds",
     )
     args = parser.parse_args()
 

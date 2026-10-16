@@ -1,4 +1,4 @@
-.PHONY: setup doctor verify-sources test test-modal test-chess-modal check-part1 check-swebench \
+.PHONY: setup doctor verify-sources test test-modal test-chess-modal test-docker check-part1 check-swebench \
 	run-code-agent run-swebench-agent run-chess-agent \
 	run-obs-experiment-no-legal-moves run-obs-experiment-legal-moves \
 	run-obs-deepseek-no-legal run-obs-deepseek-legal \
@@ -45,12 +45,18 @@ verify-sources:
 test:
 	uv run pytest
 
-# Slow and billable: launches real Modal sandboxes.
+# Slow and billable: launches real Modal sandboxes. SANDBOX is pinned so a
+# SANDBOX=docker in .env cannot send these Modal-specific tests to Docker.
 test-modal:
-	uv run pytest -m modal
+	SANDBOX=modal uv run pytest -m modal tests
 
 test-chess-modal:
-	uv run pytest -m modal tests/test_chess_sandbox.py
+	SANDBOX=modal uv run pytest -m modal tests/test_chess_sandbox.py
+
+# Slow and free: the sandbox contract, chess, and grading on this machine's
+# Docker. Skipped when Docker is not usable.
+test-docker:
+	uv run pytest -m docker tests_sandbox
 
 # Apply the student's generated patch to a fresh testbed and run the public
 # Part 1 regression test plus the existing chess-app suite.

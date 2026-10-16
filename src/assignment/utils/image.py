@@ -1,9 +1,12 @@
-"""Build a task's testbed image on Modal from a local checkout.
+"""Describe a task's testbed image, built from a local checkout.
 
 The repository under test is copied in from `task.source` — normally the
 `chess_app/` submodule — rather than cloned inside the build. That keeps the
 build offline, works with a private repository without any credential, and
 avoids a network round trip on every rebuild.
+
+The recipe is backend-neutral (`ImageSpec`); each sandbox backend builds it its
+own way, Modal on Modal and Docker on this machine.
 
 The cost is that the image reflects whatever is on disk, so `verify_source`
 checks the `chess_app` source before every build to confirm it matches the
@@ -15,9 +18,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
-
-import modal
 
 from assignment.task import Task
 
@@ -33,7 +36,9 @@ class SourceMismatch(Exception):
     """The local checkout is not the commit the task is defined against."""
 
 def _git(source: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(source), *args], capture_output=True, text=True)
+    return subprocess.run(
+        ["git", "-C", str(source), *args], capture_output=True, text=True, check=False
+    )
 
 def is_ignored(path: Path) -> bool:
     """Whether a file should be kept out of the build context."""
@@ -84,35 +89,51 @@ def verify_source(task: Task, strict: bool = True) -> None:
             "which silently invalidates the evaluation if one of them is the fix."
         )
 
-def build_testbed_image(task: Task, strict: bool = True, force_build: bool = False) -> modal.Image:
-    """Build the image holding the repository under test at its base commit.
+@dataclass(frozen=True)
+class ImageSpec:
+    """What a sandbox image contains, independent of where it is built.
+
+    Either `base` names a published image, or `dockerfile` is built from
+    `context` with `is_ignored` files left out. `pins` are installed on top,
+    last, and `files` are copied into each sandbox when it starts.
+    """
+
+    base: str | None = None
+    dockerfile: Path | None = None
+    context: Path | None = None
+    pins: tuple[str, ...] = ()
+    # (local file, absolute path in the sandbox)
+    files: tuple[tuple[Path, str], ...] = ()
+    force_build: bool = False
+
+    def __post_init__(self):
+        if (self.base is None) == (self.dockerfile is None):
+            raise ValueError("An ImageSpec needs exactly one of `base` or `dockerfile`.")
+        if self.dockerfile is not None and self.context is None:
+            raise ValueError("An ImageSpec built from a Dockerfile needs a `context`.")
+
+    def with_files(self, files: Mapping[Path, str]) -> ImageSpec:
+        """A copy that also places `files` (local path -> sandbox path) in the sandbox."""
+        return replace(self, files=self.files + tuple(files.items()))
+
+
+def build_testbed_image(task: Task, strict: bool = True, force_build: bool = False) -> ImageSpec:
+    """Describe the image holding the repository under test at its base commit.
 
     Args:
         task: The task whose Dockerfile and source checkout to build from.
-        strict: Refuse to build when the checkout does not match the task's
-            base commit. See `verify_source`.
-        force_build: Skip Modal's build cache.
+        strict: Refuse when the checkout does not match the task's base commit.
+            See `verify_source`.
+        force_build: Skip the backend's build cache.
 
     Returns:
-        A Modal image with the repository installed at /testbed.
+        The image recipe, with the repository installed at /testbed once built.
+        Pass it to `Environment(image=...)`; the sandbox backend builds it.
     """
     verify_source(task, strict=strict)
-
-    logger.info("Building %s from %s at %s", task.id, task.source, task.base_commit[:12])
-    image = modal.Image.from_dockerfile(
-        str(task.dockerfile),
-        context_dir=str(task.source),
+    return ImageSpec(
+        dockerfile=task.dockerfile,
+        context=task.source,
+        pins=task.pins,
         force_build=force_build,
-        ignore=is_ignored,
     )
-
-    # Pin last, deliberately. Modal appends its own dependency install after the
-    # Dockerfile's commands on image builder versions <= 2024.10, and the 2023.12
-    # requirements file pins fastapi==0.88.0, which pulls starlette down to 0.22
-    # and breaks every test using TestClient. Chaining here puts this layer on
-    # top of that one, so the task's versions are the ones that survive.
-    if task.pins:
-        logger.info("Pinning %d packages on top of the built image", len(task.pins))
-        image = image.pip_install(*task.pins)
-
-    return image

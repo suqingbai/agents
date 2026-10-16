@@ -1,4 +1,4 @@
-"""Validate local assignment configuration without launching a Modal sandbox."""
+"""Validate local assignment configuration without launching a sandbox."""
 
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ import httpx
 from dotenv import load_dotenv
 from modal.config import Config
 
+from assignment.sandbox import DockerSandboxConfig, resolve_sandbox_config
+from assignment.sandbox.dockercli import DockerError, docker, local_daemon
 from assignment.task import Task
 from assignment.utils.image import SourceMismatch, verify_source
-
 
 TASKS = ("tasks/chess-terminal-move",)
 PLACEHOLDERS = ("replace-", "course-key", "<", ">")
@@ -45,11 +46,21 @@ def main() -> int:
         except (FileNotFoundError, SourceMismatch, ValueError) as exc:
             failures.append(f"{task_path}: {exc}")
 
-    modal_config = Config()
-    if modal_config.get("token_id") and modal_config.get("token_secret"):
-        print("[ok] Modal credentials are configured")
-    else:
-        failures.append("Modal credentials are missing; run `uv run modal setup`")
+    try:
+        sandbox = resolve_sandbox_config()
+    except ValueError as exc:
+        failures.append(str(exc))
+        sandbox = None
+    if isinstance(sandbox, DockerSandboxConfig):
+        print("[ok] sandbox backend: docker (SANDBOX=docker)")
+        _check_docker(sandbox, failures, warnings)
+    elif sandbox is not None:
+        print("[ok] sandbox backend: modal")
+        modal_config = Config()
+        if modal_config.get("token_id") and modal_config.get("token_secret"):
+            print("[ok] Modal credentials are configured")
+        else:
+            failures.append("Modal credentials are missing; run `uv run modal setup`")
 
     api_key = _configured("OPENAI_API_KEY")
     base_url = _configured("OPENAI_BASE_URL")
@@ -101,10 +112,36 @@ def main() -> int:
     if failures:
         for failure in failures:
             print(f"[error] {failure}")
-        print("Configuration is not ready; no Modal sandbox was launched.")
+        print("Configuration is not ready; no sandbox was launched.")
         return 1
-    print("Assignment configuration is ready; no Modal sandbox was launched.")
+    print("Assignment configuration is ready; no sandbox was launched.")
     return 0
+
+
+def _check_docker(
+    config: DockerSandboxConfig, failures: list[str], warnings: list[str]
+) -> None:
+    """Check that sandboxes can run and be built on this machine's Docker."""
+    try:
+        daemon = local_daemon()
+    except DockerError as exc:
+        failures.append(str(exc))
+        return
+    print(f"[ok] Docker Engine {daemon.version} at {daemon.endpoint} ({daemon.platform})")
+    if daemon.arch != "amd64":
+        warnings.append(
+            f"Docker runs {daemon.platform} containers; SWE-bench images are amd64-only, "
+            "so they run emulated or not at all"
+        )
+    try:
+        if config.build_context:
+            docker("buildx", "inspect", config.build_context)
+            print(f"[ok] images build with buildx builder {config.build_context!r}")
+        else:
+            docker("buildx", "version")
+            print("[ok] images build with this machine's Docker (buildx)")
+    except DockerError as exc:
+        failures.append(f"Docker cannot build sandbox images: {exc}")
 
 
 if __name__ == "__main__":
