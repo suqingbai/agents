@@ -17,6 +17,7 @@ import pytest
 from openai.types.chat import ChatCompletion
 
 from assignment.agent import CodeAgent, StepLimitError
+from assignment.agent.base import Agent
 
 TASK = "print hello, world to the terminal"
 
@@ -266,6 +267,52 @@ def test_context_compaction_summarizes_old_steps_and_keeps_recent_tool_pair(make
 
     trajectory = json.loads(Path(agent.logs_save_path).read_text())
     assert len(trajectory["compactions"]) == 1
+
+
+def test_build_prompt_orders_system_task_and_agent_state(monkeypatch):
+    """`build_prompt` opens with system/task, then replays agent_state in order.
+
+    `agent_state` entries is list of dicts whose value is the already-shaped message 
+    (it carries its own "role").
+    `build_prompt` should unwrap each entry and append it as-is, preserving
+    the chronological order the entries were recorded in.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:0/v1")
+
+    agent = Agent(FakeEnvironment(), model="gpt-4.1")
+    agent.system_prompt = "You are a helpful coding agent."
+    agent.task_prompt = TASK
+
+    assistant_turn = {
+        "role": "assistant",
+        "content": "Calling execute.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "execute", "arguments": json.dumps({"command": "ls -la"})},
+            }
+        ],
+    }
+    tool_result = {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": json.dumps({"output": OUTPUTS["ls -la"], "returncode": 0}),
+    }
+    agent.agent_state = [
+        assistant_turn,
+        tool_result,
+    ]
+
+    prompt = agent.build_prompt()
+
+    assert prompt == [
+        {"role": "system", "content": agent.system_prompt},
+        {"role": "user", "content": agent.task_prompt},
+        assistant_turn,
+        tool_result,
+    ], "system and task should come first, then agent_state entries in recorded order"
 
 
 def test_skill_catalog_lists_names_without_skill_bodies(monkeypatch, tmp_path):

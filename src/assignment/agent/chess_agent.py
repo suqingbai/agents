@@ -136,13 +136,13 @@ class ChessAgent(Agent):
         self.system_prompt = prompt_template.render()
         if programmatic_tools:
             self.system_prompt += "\n\n" + PROGRAMMATIC_CHESS_PROMPT
+        standing_rules = self.standing_rules(
+            refresh="take the current position from the latest returned board"
+        )
+        rules = "\n".join(f"- {rule}" for rule in standing_rules)
+        self.system_prompt += f"\n\n# Rules\n{rules}"
         if self.skills:
-            catalog = "\n".join(skill["metadata"] for skill in self.skills.values())
-            self.system_prompt += (
-                "\n\nReusable skills are available. Call `invoke_skill` with a "
-                "skill's name to load its instructions, and follow them in place "
-                f"of your default approach.\n\n<skills>\n{catalog}\n</skills>\n"
-            )
+            self.system_prompt += "\n\n" + self.skills_prompt()
         opening_instruction = (
             "Choose one move from legal_moves and call play_move."
             if include_legal_moves
