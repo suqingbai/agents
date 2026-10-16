@@ -16,6 +16,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
+import yaml
 
 from assignment.env import Environment
 from assignment.agent.tools import INVOKE_SKILL_TOOL
@@ -26,6 +27,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMPACTION_KEEP_RECENT_STEPS = 1
 DEFAULT_COMPACTION_MAX_TOKENS = 1_200
 MAX_OBSERVATION_CHARS = 10_000
+
+TOOL_USE_RULE = "Act only through tool calls. Before each call, state in a sentence or two what you expect it to show. A reply without a tool call does nothing."
+COMPACTION_RULE_TEMPLATE = (
+    "When the context grows long, earlier steps may be replaced by a "
+    "working-memory summary. Trust it, and {refresh}."
+)
+SKILLS_PROMPT_INTRO = (
+    "Skills are written procedures for specific kinds of work. Their names and "
+    "descriptions are listed below. Call `invoke_skill` with a skill's name to "
+    "load its full instructions, then follow them in place of your default "
+    "approach. Check this list before you start and again before you finish: a "
+    "skill may define steps that must happen before the run ends."
+)
 
 # TODO(Part 2): Write instructions that make the model produce concise working
 # memory for a software agent. The prompt should preserve concrete progress,
@@ -150,8 +164,7 @@ class Agent:
         if self.skills:
             self.tools.append(INVOKE_SKILL_TOOL)
 
-        # TODO(1.1.a): Add machinery to maintain agent state as it takes actions
-        # and observes the results.
+        self.agent_state: list[dict[str, Any]] = []
 
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
         """Load the skill folders exposed to this agent."""
@@ -164,7 +177,87 @@ class Agent:
         # ``content`` of the skill file for ``invoke_skill``. Reject duplicate
         # names and malformed or missing frontmatter with a clear
         # ``ValueError``.
-        raise NotImplementedError
+        if not skills_path.exists() or not skills_path.is_dir():
+            raise ValueError(f"Skills path is not a directory: {skills_path}")
+
+        skills: dict[str, dict[str, str]] = {}
+
+        for skill_dir in sorted(skills_path.iterdir()):
+            if not skill_dir.is_dir():
+                continue
+
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.is_file():
+                raise ValueError(f"Missing SKILL.md in skill directory: {skill_dir}")
+
+            content = skill_file.read_text(encoding="utf-8")
+            lines = content.splitlines()
+            if not lines or lines[0].strip() != "---":
+                raise ValueError(f"Missing YAML frontmatter in {skill_file}")
+
+            try:
+                closing_delimiter = next(
+                    index
+                    for index, line in enumerate(lines[1:], start=1)
+                    if line.strip() == "---"
+                )
+            except StopIteration as exc:
+                raise ValueError(
+                    f"Unclosed YAML frontmatter in {skill_file}"
+                ) from exc
+
+            frontmatter_text = "\n".join(lines[1:closing_delimiter])
+            try:
+                frontmatter = yaml.safe_load(frontmatter_text)
+            except yaml.YAMLError as exc:
+                raise ValueError(
+                    f"Invalid YAML frontmatter in {skill_file}: {exc}"
+                ) from exc
+
+            if not isinstance(frontmatter, dict):
+                raise ValueError(
+                    f"YAML frontmatter must be a mapping in {skill_file}"
+                )
+
+            name = frontmatter.get("name")
+            description = frontmatter.get("description")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"Missing or invalid skill name in {skill_file}")
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(
+                    f"Missing or invalid skill description in {skill_file}"
+                )
+
+            name = name.strip()
+            if name in skills:
+                raise ValueError(f"Duplicate skill name {name!r} in {skill_file}")
+
+            skills[name] = {
+                "metadata": f"- {name}: {description.strip()}",
+                "content": content,
+            }
+
+        return skills
+
+    def step_budget_rule(self) -> str:
+        """Return the instruction describing this agent's response budget."""
+
+        return f"You have a budget of {self.step_limit} responses."
+
+    def compaction_rule(self, refresh: str) -> str:
+        """Return the working-memory rule when context compaction is enabled."""
+
+        if not self.compaction_enabled:
+            return ""
+        return COMPACTION_RULE_TEMPLATE.format(refresh=refresh)
+
+    def skills_prompt(self) -> str:
+        """Return the skill catalog for the system prompt, without skill bodies."""
+
+        if not self.skills:
+            return ""
+        catalog = "\n\n".join(skill["metadata"] for skill in self.skills.values())
+        return f"# Skills\n{SKILLS_PROMPT_INTRO}\n\n<skills>\n{catalog}\n</skills>"
 
     def query_language_model(self) -> dict[str, Any]:
         """Send one tool-enabled Chat Completions request and normalize it."""
@@ -215,7 +308,9 @@ class Agent:
     def process_response(self, response: Any) -> dict[str, Any]:
         """Return relevant parts of the language model's response."""
 
-        return response.choices[0].message.model_dump(exclude_none=True)
+        message = response.choices[0].message.model_dump(exclude_none=True)
+        self.agent_state.append(message)
+        return message
 
     def build_prompt(self) -> list[dict[str, Any]]:
         # TODO(1.1.a): Construct a sequence of messages that form the language
@@ -227,7 +322,18 @@ class Agent:
 
         # You want to be careful about which attributes of the class you modify
         # here as they may also be handled by the subclasses.
-        raise NotImplementedError
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.task_prompt},
+        ]
+
+        # Each entry in agent_state is a dict whose value is the already-shaped message (including its own
+        # "role" field). Append them in the order they occurred so
+        # the model sees its own prior turns and their observations in order.
+        for message in self.agent_state:
+            messages.append(message)
+
+        return messages
 
     def estimate_active_prompt_tokens(self) -> int:
         """Estimate the next prompt, calibrated by the provider's latest usage."""
@@ -331,12 +437,23 @@ class Agent:
             # by setting `Agent.finished`. If the agent exceeds the
             # `step_limit`, raise `StepLimitError`.
 
+            while not self.finished:
+                if self.steps_taken >= self.step_limit:
+                    raise StepLimitError(
+                        f"Step limit of {self.step_limit} reached without finishing."
+                    )
+                response = self.query_language_model()
+                if response.get("tool_calls"):
+                    observations = self.execute_tool_calls(response["tool_calls"])
+                    self.agent_state.extend(observations)
+                
+            
+
             # TODO(2.2) Call `maybe_compact_context()` before each new action
             # request in your shared loop. It already estimates active tokens
             # and handles the threshold, and tracks compaction events for
             # logging.
 
-            raise NotImplementedError
         finally:
             # This block is provided infrastructure. Do not modify it: a
             # trajectory is required even when a run fails.
