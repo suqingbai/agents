@@ -93,8 +93,7 @@ class CodeAgent(Agent):
         self.task = task
         self.submitted_patch = ""
 
-        # TODO(Part 1.3): Make the `execute` and `send_message` tools available
-        # to the agent.
+        self.tools.extend([EXECUTE_TOOL, SEND_MESSAGE_TOOL])
 
         self.system_prompt = CODE_AGENT_SYSTEM_PROMPT_TEMPLATE.render(
             system_information=format_system_information(environment),
@@ -114,11 +113,6 @@ class CodeAgent(Agent):
         self, tool_calls: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
         """Execute ``execute`` and ``send_message`` calls in the code sandbox."""
-
-        # TODO(Part 1.3): Parse each call, execute recognized tools, and return
-        # one message per call (there may be multiple tool calls in one agent
-        # response!). Malformed JSON and unknown tools must become recoverable
-        # observations relayed to the agent instead of exceptions.
 
         observations: list[dict[str, str]] = []
         for call in tool_calls:

@@ -51,6 +51,20 @@ class StepLimitError(Exception):
     """Raised when an agent exhausts its model-call budget."""
 
 
+def format_system_information(environment: Environment) -> str:
+    """Describe the operating system and machine running the environment."""
+
+    return json.dumps(
+        {
+            "machine": environment.machine,
+            "release": environment.release,
+            "system": environment.system,
+            "version": environment.version,
+        },
+        indent=2,
+    )
+
+
 def format_tool_output(output: dict[str, Any]) -> str:
     """Format a terminal result as a compact, tagged model observation."""
 
@@ -169,14 +183,6 @@ class Agent:
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
         """Load the skill folders exposed to this agent."""
 
-        # TODO(1.4): Validate ``skills_path``, discover one ``SKILL.md``
-        # per child directory, parse its YAML frontmatter (what's between the
-        # `---` tags at the head of the file), and return a mapping
-        # keyed by the frontmatter ``name``. Each value must contain a concise
-        # ``metadata`` string for the model's skill catalog and the complete
-        # ``content`` of the skill file for ``invoke_skill``. Reject duplicate
-        # names and malformed or missing frontmatter with a clear
-        # ``ValueError``.
         if not skills_path.exists() or not skills_path.is_dir():
             raise ValueError(f"Skills path is not a directory: {skills_path}")
 
@@ -313,12 +319,6 @@ class Agent:
         return message
 
     def build_prompt(self) -> list[dict[str, Any]]:
-        # TODO(1.1.a): Construct a sequence of messages that form the language
-        # model prompt. This should include standing instructions, task
-        # specification, prior interaction including observations, reasoning,
-        # and actions from previous turns. Note that this method should be
-        # domain-agnostic and construct the prompt in a way that would apply
-        # to any of the inheriting domain-specific agents.
 
         # You want to be careful about which attributes of the class you modify
         # here as they may also be handled by the subclasses.
@@ -429,13 +429,30 @@ class Agent:
         """Run ReAct steps, always saving the trajectory and stopping Modal."""
 
         try:
-            # TODO(1.2) Run the ReAct loop. Orchestrate the sequence of
-            # prompting the language model to produce reasoning and actions,
-            # extracting the tool calls produced by the model, and executing
-            # the tool calls to obtain the agent's observation for the next
-            # step. Ensure you identify when the agent has completed the task
-            # by setting `Agent.finished`. If the agent exceeds the
-            # `step_limit`, raise `StepLimitError`.
+
+            while not self.finished:
+                if self.steps_taken >= self.step_limit:
+                    raise StepLimitError(
+                        f"Step limit of {self.step_limit} reached without finishing."
+                    )
+                response = self.query_language_model()
+                if response.get("tool_calls"):
+                    observations = self.execute_tool_calls(response["tool_calls"])
+                    self.agent_state.extend(observations)
+                
+            
+
+            while not self.finished:
+                if self.steps_taken >= self.step_limit:
+                    raise StepLimitError(
+                        f"Step limit of {self.step_limit} reached without finishing."
+                    )
+                response = self.query_language_model()
+                if response.get("tool_calls"):
+                    observations = self.execute_tool_calls(response["tool_calls"])
+                    self.agent_state.extend(observations)
+                
+            
 
             while not self.finished:
                 if self.steps_taken >= self.step_limit:
