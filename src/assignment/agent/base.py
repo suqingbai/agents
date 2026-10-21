@@ -438,22 +438,9 @@ class Agent:
                 response = self.query_language_model()
                 if response.get("tool_calls"):
                     observations = self.execute_tool_calls(response["tool_calls"])
-                    self.agent_state.extend(observations)
+                    self.agent_state.extend(observations)                       
                 
             
-
-            while not self.finished:
-                if self.steps_taken >= self.step_limit:
-                    raise StepLimitError(
-                        f"Step limit of {self.step_limit} reached without finishing."
-                    )
-                response = self.query_language_model()
-                if response.get("tool_calls"):
-                    observations = self.execute_tool_calls(response["tool_calls"])
-                    self.agent_state.extend(observations)
-                
-            
-
             # TODO(2.2) Call `maybe_compact_context()` before each new action
             # request in your shared loop. It already estimates active tokens
             # and handles the threshold, and tracks compaction events for

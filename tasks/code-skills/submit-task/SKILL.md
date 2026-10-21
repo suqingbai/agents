@@ -6,8 +6,7 @@ description: When the task is complete, take the required steps to submit the so
 When you have finished, you must submit your changes as a git patch, in three separate steps.
 
 # Step 1: Create the patch file
-Run `git diff -- path/to/file1 path/to/file2 > patch.txt`, listing only the
-source files you modified. Do not commit your changes.
+Run `git diff -- path/to/file1 path/to/file2 > patch.txt` in the current working directory specified by the system instructions, listing only the source files you modified. Do not commit your changes.
 
 > [!IMPORTANT]
 > The patch must contain only the changes to the source files you edited to fix
@@ -18,8 +17,7 @@ source files you modified. Do not commit your changes.
 > - binary or compiled files
 
 # Step 2: Verify the patch
-Read `patch.txt` and confirm it contains only your intended changes, and that its
-headers show `--- a/` and `+++ b/` paths.
+Read `patch.txt` from that same working directory and confirm it contains only your intended changes, and that its headers show `--- a/` and `+++ b/` paths.
 
 # Step 3: Submit
 Call `send_message` with the message content being a summary of the work.

@@ -89,6 +89,12 @@ def run_code_agent() -> None:
 
     parser = argparse.ArgumentParser(description=run_code_agent.__doc__)
     parser.add_argument("--task", type=Path, default=DEFAULT_TASK)
+    parser.add_argument(
+        "--sandbox",
+        choices=["docker", "modal"],
+        default="docker",
+        help="where to run the agent sandbox (default: docker)",
+    )
     _add_code_agent_arguments(parser)
     args = parser.parse_args()
 
@@ -99,8 +105,9 @@ def run_code_agent() -> None:
 
     submitted_patch = ""
     with Environment(
-        image=build_testbed_image(task),
+        image=build_testbed_image(task, sandbox=args.sandbox),
         cwd="/testbed",
+        sandbox=args.sandbox,
     ) as environment:
         agent = CodeAgent(
             task=task.problem_statement,

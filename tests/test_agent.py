@@ -340,6 +340,12 @@ def test_skill_catalog_lists_names_without_skill_bodies(monkeypatch, tmp_path):
         "the skill's body should not be in the prompt before the skill is invoked"
     )
 
+    tool_call = make_raw_action(
+        "call_skill", "invoke_skill", json.dumps({"name": "submit-task"})
+    )["tool_calls"]
+    observation = agent.execute_tool_calls(tool_call)
+    assert observation[0]["content"] == agent.skills["submit-task"]["content"]
+
 
 def test_step_limit_raises(make_agent):
     """A run that never finishes stops after exactly step_limit model calls."""
@@ -352,6 +358,17 @@ def test_step_limit_raises(make_agent):
     assert len(calls) == step_limit, (
         f"expected {step_limit} calls to the model, the agent made {len(calls)}"
     )
+
+
+def test_send_message_prints_summary(make_agent, capsys):
+    summary = "Implemented the fix and verified it with the focused test."
+    agent, _ = make_agent(
+        [make_raw_action("call_send", "send_message", json.dumps({"summary": summary}))]
+    )
+
+    agent.run()
+
+    assert summary in capsys.readouterr().out
 
 
 def test_malformed_arguments_are_not_executed(make_agent):
