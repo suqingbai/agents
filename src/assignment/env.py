@@ -168,6 +168,25 @@ class AssignmentDockerDeployment(DockerDeployment):
             server,
         ]
 
+    async def stop(self) -> None:
+        """Close the runtime, then always kill and reap the container.
+
+        Upstream stop() awaits ``runtime.close()`` first, so when that raises
+        (the container already died) or is cancelled, the kill, the reap and the
+        state reset never run. Close it here, tolerating failure, and leave the
+        rest to upstream with no runtime left to close.
+        """
+        runtime, self._runtime = self._runtime, None
+        try:
+            if runtime is not None:
+                await runtime.close()
+        except Exception as exc:
+            self.logger.warning(
+                "Closing the SWE-ReX runtime failed; killing the container anyway: %s", exc
+            )
+        finally:
+            await super().stop()
+
     def is_running(self) -> bool:
         """Whether the container process is still running."""
         return self._container_process is not None and self._container_process.poll() is None
@@ -253,14 +272,20 @@ class Environment:
 
         asyncio.run(_start())
 
-        if conda_env:
-            self.activate_conda_env(conda_env)
+        # The sandbox is running now, and a failed constructor never reaches
+        # __exit__, so stop it here rather than leak it until deployment_timeout.
+        try:
+            if conda_env:
+                self.activate_conda_env(conda_env)
 
-        # Read the platform from inside the container, not from platform.uname(),
-        # which would describe the machine running this code instead.
-        self.system, self.release, self.version, self.machine = self.execute(
-            "uname -s; uname -r; uname -v; uname -m"
-        )["output"].splitlines()
+            # Read the platform from inside the container, not from platform.uname(),
+            # which would describe the machine running this code instead.
+            self.system, self.release, self.version, self.machine = self.execute(
+                "uname -s; uname -r; uname -v; uname -m"
+            )["output"].splitlines()
+        except BaseException:
+            self.stop()
+            raise
 
     def is_alive(self) -> bool:
         """Whether the sandbox is still running.
