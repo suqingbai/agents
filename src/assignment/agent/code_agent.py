@@ -44,11 +44,11 @@ CODE_AGENT_SYSTEM_PROMPT_TEMPLATE = Template(
 - {{ step_budget_rule }} Prefer commands that answer several questions at once.
 - If the issue is ambiguous, choose the most reasonable reading and say so in your final message; do not stop to ask.
 {% if compaction_rule %}- {{ compaction_rule }}
-{% endif %}- Calling `send_message` ends the run, and nothing can be done after it. Call it once, when the fix is verified, with a short summary of the root cause, the change, and how you verified it.
+{% endif %}
 {%- if skills_prompt %}
-
 {{ skills_prompt }}
-{%- endif %}"""
+{%- endif %}
+"""
 )
 """Standing instructions for the coding agent; the skills section is optional."""
 
@@ -115,18 +115,19 @@ class CodeAgent(Agent):
         """Execute ``execute`` and ``send_message`` calls in the code sandbox."""
 
         observations: list[dict[str, str]] = []
+        available_tools = [tool["function"]["name"] for tool in self.tools]
         for call in tool_calls:
             call_id = call.get("id", "")
             name = call.get("function", {}).get("name")
 
-            if name not in ("execute", "send_message"):
+            if name not in available_tools:
                 observations.append(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
                         "content": (
                             f"Error: unrecognized tool {name!r}. "
-                            "Available tools: execute, send_message."
+                            f"Available tools: {', '.join(available_tools)}."
                         ),
                     }
                 )
@@ -151,8 +152,16 @@ class CodeAgent(Agent):
 
             if name == "send_message":
                 # Submitting ends the run; the patch is read from patch.txt afterwards.
+                print(arguments["summary"], flush=True)
                 self.finished = True
                 content = "Message sent."
+            elif name == "invoke_skill":
+                skill_name = arguments["name"]
+                skill = self.skills.get(skill_name)
+                if skill is None:
+                    content = f"Error: unknown skill {skill_name!r}."
+                else:
+                    content = skill["content"]
             else:
                 options = {
                     key: arguments[key]
@@ -181,6 +190,12 @@ class CodeAgent(Agent):
         if name == "send_message":
             if not isinstance(arguments.get("summary"), str):
                 return "'summary' is required and must be a string"
+            return None
+
+        if name == "invoke_skill":
+            skill_name = arguments.get("name")
+            if not isinstance(skill_name, str) or not skill_name:
+                return "'name' is required and must be a non-empty string"
             return None
 
         command = arguments.get("command")

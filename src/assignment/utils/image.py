@@ -14,8 +14,13 @@ already-fixed working tree would make a broken agent look like it passed.
 from __future__ import annotations
 
 import logging
+import os
+import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import Literal
 
 import modal
 
@@ -84,21 +89,66 @@ def verify_source(task: Task, strict: bool = True) -> None:
             "which silently invalidates the evaluation if one of them is the fix."
         )
 
-def build_testbed_image(task: Task, strict: bool = True, force_build: bool = False) -> modal.Image:
+def _build_docker_image(task: Task, force_build: bool) -> str:
+    """Build the testbed with the local Docker daemon and return its tag.
+
+    Mirrors the Modal build: the same Dockerfile, a context holding exactly the
+    files Modal would upload (every file under `task.source` that `is_ignored`
+    keeps), and the pins as a final `python -m pip install` layer, sorted the
+    way Modal's `pip_install` sorts them.
+    """
+    tag = f"assignment-testbed/{task.id}:{task.base_commit[:12]}"
+    base = f"{tag}-unpinned"
+    cache = ["--no-cache"] if force_build else []
+
+    with tempfile.TemporaryDirectory() as context:
+        for root, dirs, files in os.walk(task.source):
+            relative = Path(root).relative_to(task.source)
+            dirs[:] = [d for d in dirs if not is_ignored(relative / d)]
+            for name in files:
+                if not is_ignored(relative / name):
+                    target = Path(context) / relative / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(Path(root) / name, target)
+
+        # BuildKit cannot use a bare image ID in FROM, so the Dockerfile's
+        # result gets its own tag for the pin layer to build on.
+        subprocess.run(["docker", "build", *cache, "-t", base, "-f", str(task.dockerfile), context], check=True)
+
+    if not task.pins:
+        subprocess.run(["docker", "tag", base, tag], check=True)
+        return tag
+
+    logger.info("Pinning %d packages on top of the built image", len(task.pins))
+    dockerfile = f"FROM {base}\nRUN python -m pip install {shlex.join(sorted(task.pins))}\n"
+    subprocess.run(["docker", "build", *cache, "-t", tag, "-"], input=dockerfile, text=True, check=True)
+    return tag
+
+def build_testbed_image(
+    task: Task,
+    strict: bool = True,
+    force_build: bool = False,
+    sandbox: Literal["modal", "docker"] = "docker",
+) -> modal.Image | str:
     """Build the image holding the repository under test at its base commit.
 
     Args:
         task: The task whose Dockerfile and source checkout to build from.
         strict: Refuse to build when the checkout does not match the task's
             base commit. See `verify_source`.
-        force_build: Skip Modal's build cache.
+        force_build: Skip the build cache.
+        sandbox: Build on Modal, or with the local Docker daemon.
 
     Returns:
-        A Modal image with the repository installed at /testbed.
+        A Modal image, or the tag of a local Docker image, with the repository
+        installed at /testbed.
     """
     verify_source(task, strict=strict)
 
     logger.info("Building %s from %s at %s", task.id, task.source, task.base_commit[:12])
+    if sandbox == "docker":
+        return _build_docker_image(task, force_build)
+
     image = modal.Image.from_dockerfile(
         str(task.dockerfile),
         context_dir=str(task.source),

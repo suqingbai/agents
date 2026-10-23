@@ -276,16 +276,19 @@ def _grade(
     }
     return report
 
-def resolve_image(spec, task: Task | None, strict: bool):
+def resolve_image(spec, task: Task | None, strict: bool, sandbox: str = "docker"):
     """The image to grade in: published when one exists, otherwise built.
 
     Args:
         spec: The evaluation being run, consulted for its `task_id`.
         task: The task to build from, required when nothing is published.
         strict: Passed to the build; refuses a checkout off the base commit.
+        sandbox: ``"docker"`` or ``"modal"``; selects how a missing image is
+            built. Ignored when an image is published.
 
     Returns:
-        A published image name, or a `modal.Image` built from the task.
+        A published image name, or an image built from the task (a Docker tag
+        for ``"docker"``, a `modal.Image` for ``"modal"``).
 
     Raises:
         ValueError: If no image is published and no task was given to build.
@@ -299,7 +302,7 @@ def resolve_image(spec, task: Task | None, strict: bool):
         raise ValueError(
             f"{spec.task_id!r} has no published image, so a task is needed to build one."
         )
-    return build_testbed_image(task, strict=strict)
+    return build_testbed_image(task, strict=strict, sandbox=sandbox)
 
 def evaluate(
     spec,
@@ -307,6 +310,7 @@ def evaluate(
     task: Task | None = None,
     timeout: float = 600,
     strict: bool = True,
+    sandbox: str = "docker",
 ) -> Report:
     """Build or fetch the testbed, apply a candidate patch, and grade it.
 
@@ -332,6 +336,10 @@ def evaluate(
         timeout: Seconds allowed for the test command.
         strict: Refuse to build when the local checkout does not match the
             task's base commit, which would silently invalidate the result.
+        sandbox: ``"docker"`` (default) to build the image and grade in a
+            container on the local Docker daemon, or ``"modal"`` to use a Modal
+            sandbox. Used both for building a local task's image and for
+            running the tests.
 
     Returns:
         A report. Failures to apply a patch or to run the tests are recorded in
@@ -345,9 +353,11 @@ def evaluate(
         raise ValueError(f"Evaluation is for {spec.task_id!r}, not task {task.id!r}.")
 
     report = Report(task_id=spec.task_id, patch_applied=patch is None)
-    image = resolve_image(spec, task, strict)
+    image = resolve_image(spec, task, strict, sandbox)
 
-    with Environment(image=image, cwd=spec.cwd, runtime_timeout=timeout) as env:
+    with Environment(
+        image=image, cwd=spec.cwd, runtime_timeout=timeout, sandbox=sandbox
+    ) as env:
         # Only substituted when the command asks for it, so a spec that names
         # its own interpreter keeps it.
         test_cmd = spec.test_cmd

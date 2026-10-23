@@ -1,10 +1,14 @@
 import asyncio
+import logging
 import posixpath
+import subprocess
 import time
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Literal
 
 import modal
+from swerex import PACKAGE_NAME, REMOTE_EXECUTABLE_NAME
+from swerex.deployment.docker import DockerDeployment
 from swerex.deployment.modal import ModalDeployment
 from swerex.runtime.abstract import Command
 from swerex.runtime.remote import RemoteRuntime
@@ -94,9 +98,103 @@ class AssignmentModalDeployment(ModalDeployment):
                 "become reachable. " + " | ".join(details)
             ) from exc
 
+
+class AssignmentDockerDeployment(DockerDeployment):
+    """Local Docker deployment that bootstraps and expires like the Modal one.
+
+    Upstream DockerDeployment installs pipx with the image's ``python3 -m pip``,
+    which adds packages to the testbed's own interpreter, and its containers
+    live until ``stop()``. Instead, add the same apt pipx layers that
+    ModalDeployment appends, start the server with Modal's command, and cap the
+    container's lifetime at ``deployment_timeout`` as Modal does.
+    """
+
+    def __init__(
+        self,
+        *,
+        image: str,
+        install_pipx: bool = True,
+        deployment_timeout: float = 3600.0,
+        runtime_timeout: float | None = None,
+        logger: logging.Logger | None = None,
+        **kwargs: Any,
+    ):
+        """
+        Args:
+            image: Tag of a local or registry Docker image.
+            install_pipx: Build ``<image>-pipx`` with pipx installed through
+                apt, needed to bootstrap the SWE-ReX server.
+            deployment_timeout: Seconds the container may stay alive before it
+                is killed and removed.
+            runtime_timeout: Accepted for parity with AssignmentModalDeployment
+                and ignored; DockerDeploymentConfig rejects unknown keys.
+            **kwargs: Passed to DockerDeploymentConfig (e.g. startup_timeout).
+        """
+        self._deployment_timeout = deployment_timeout
+        if install_pipx:
+            image = self._with_pipx(image, kwargs.get("container_runtime", "docker"))
+        super().__init__(image=image, logger=logger, **kwargs)
+
+    @staticmethod
+    def _with_pipx(image: str, container_runtime: str) -> str:
+        # The same commands ModalDeployment's _ImageBuilder.ensure_pipx_installed adds.
+        dockerfile = (
+            f"FROM {image}\n"
+            "RUN apt-get update\n"
+            "RUN apt-get install -y pipx\n"
+            "RUN pipx ensurepath\n"
+        )
+        tag = f"{image}-pipx"
+        subprocess.run(
+            [container_runtime, "build", "-q", "-t", tag, "-"],
+            input=dockerfile,
+            text=True,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        return tag
+
+    def _get_swerex_start_cmd(self, token: str) -> list[str]:
+        rex_args = f"--auth-token {token}"
+        server = f"{REMOTE_EXECUTABLE_NAME} {rex_args} || pipx run {PACKAGE_NAME} {rex_args}"
+        # Make the container's main process expire on time; --rm then removes it.
+        return [
+            "timeout",
+            "-s",
+            "KILL",
+            str(int(self._deployment_timeout)),
+            "/bin/sh",
+            "-c",
+            server,
+        ]
+
+    async def stop(self) -> None:
+        """Close the runtime, then always kill and reap the container.
+
+        Upstream stop() awaits ``runtime.close()`` first, so when that raises
+        (the container already died) or is cancelled, the kill, the reap and the
+        state reset never run. Close it here, tolerating failure, and leave the
+        rest to upstream with no runtime left to close.
+        """
+        runtime, self._runtime = self._runtime, None
+        try:
+            if runtime is not None:
+                await runtime.close()
+        except Exception as exc:
+            self.logger.warning(
+                "Closing the SWE-ReX runtime failed; killing the container anyway: %s", exc
+            )
+        finally:
+            await super().stop()
+
+    def is_running(self) -> bool:
+        """Whether the container process is still running."""
+        return self._container_process is not None and self._container_process.poll() is None
+
+
 class Environment:
     """
-    Executes bash commands in a Modal sandbox via SWE-ReX.
+    Executes bash commands in a Modal or local Docker sandbox via SWE-ReX.
     """
 
     # NOTE(source): https://github.com/SWE-agent/mini-swe-agent/blob/main/src/minisweagent/environments/extra/swerex_modal.py
@@ -111,8 +209,9 @@ class Environment:
         install_pipx: bool = True,
         modal_sandbox_kwargs: dict[str, Any] | None = None,
         conda_env: str | None = None,
+        sandbox: Literal["modal", "docker"] = "docker",
     ):
-        """Launch a Modal sandbox and block until its runtime answers.
+        """Launch a sandbox and block until its runtime answers.
 
         Args:
             image: A prebuilt `modal.Image`, a Dockerhub or ECR image name, or a
@@ -122,30 +221,50 @@ class Environment:
             cwd: Working directory for commands that do not specify one.
             startup_timeout: Seconds to wait for the SWE-ReX runtime to come up.
             runtime_timeout: Seconds a single command may run before timing out.
-            deployment_timeout: Seconds the sandbox may stay alive before Modal
-                reclaims it.
+            deployment_timeout: Seconds the sandbox may stay alive before it is
+                reclaimed.
             install_pipx: Install pipx in the image, needed to bootstrap the
                 SWE-ReX server when it is not already present.
             modal_sandbox_kwargs: Additional keyword arguments forwarded to
                 ``modal.Sandbox.create``. This is used for capabilities such as
-                encrypted port forwarding.
+                encrypted port forwarding. Modal only.
             conda_env: Name of a conda environment to put on PATH for every
                 command. SWE-bench images install the repository under test into
                 an environment named ``testbed`` but never activate it, so
                 without this ``python`` is conda's base environment, where the
                 repository and its dependencies are not installed.
+            sandbox: ``"modal"`` for a Modal sandbox, or ``"docker"`` for a
+                container on the local Docker daemon, where `image` must be a
+                Docker image tag.
         """
         self.cwd = cwd
         # Merged into every command's environment; a per-call `env` wins.
         self.env_defaults: dict[str, str] = {}
-        self.deployment = AssignmentModalDeployment(
-            image=image,
-            startup_timeout=startup_timeout,
-            runtime_timeout=runtime_timeout,
-            deployment_timeout=deployment_timeout,
-            install_pipx=install_pipx,
-            modal_sandbox_kwargs=modal_sandbox_kwargs,
-        )
+        self.sandbox = sandbox
+        if sandbox == "modal":
+            self.deployment = AssignmentModalDeployment(
+                image=image,
+                startup_timeout=startup_timeout,
+                runtime_timeout=runtime_timeout,
+                deployment_timeout=deployment_timeout,
+                install_pipx=install_pipx,
+                modal_sandbox_kwargs=modal_sandbox_kwargs,
+            )
+        elif sandbox == "docker":
+            if modal_sandbox_kwargs:
+                raise ValueError(
+                    "modal_sandbox_kwargs only applies to sandbox='modal', "
+                    "not sandbox='docker'."
+                )
+            self.deployment = AssignmentDockerDeployment(
+                image=image,
+                startup_timeout=startup_timeout,
+                runtime_timeout=runtime_timeout,
+                deployment_timeout=deployment_timeout,
+                install_pipx=install_pipx,
+            )
+        else:
+            raise ValueError(f"Unknown sandbox {sandbox!r}; expected 'modal' or 'docker'.")
 
         async def _start():
             await self.deployment.start()
@@ -153,22 +272,31 @@ class Environment:
 
         asyncio.run(_start())
 
-        if conda_env:
-            self.activate_conda_env(conda_env)
+        # The sandbox is running now, and a failed constructor never reaches
+        # __exit__, so stop it here rather than leak it until deployment_timeout.
+        try:
+            if conda_env:
+                self.activate_conda_env(conda_env)
 
-        # Read the platform from inside the container, not from platform.uname(),
-        # which would describe the machine running this code instead.
-        self.system, self.release, self.version, self.machine = self.execute(
-            "uname -s; uname -r; uname -v; uname -m"
-        )["output"].splitlines()
+            # Read the platform from inside the container, not from platform.uname(),
+            # which would describe the machine running this code instead.
+            self.system, self.release, self.version, self.machine = self.execute(
+                "uname -s; uname -r; uname -v; uname -m"
+            )["output"].splitlines()
+        except BaseException:
+            self.stop()
+            raise
 
     def is_alive(self) -> bool:
         """Whether the sandbox is still running.
 
         Modal reclaims a sandbox once `deployment_timeout` elapses, and the
         deployment keeps its handle afterwards, so this asks the sandbox itself
-        rather than trusting the handle's existence.
+        rather than trusting the handle's existence. A Docker container is
+        killed at the same deadline, so this asks whether its process still runs.
         """
+        if self.sandbox == "docker":
+            return self.deployment.is_running()
         sandbox = self.deployment._sandbox
         return sandbox is not None and sandbox.poll() is None
 
@@ -293,6 +421,11 @@ class Environment:
                 termination steps.
         """
 
+        if self.sandbox == "docker":
+            # DockerDeployment.stop() kills the container, and --rm removes it.
+            asyncio.run(asyncio.wait_for(self.deployment.stop(), timeout=timeout))
+            return
+
         async def _stop():
             # ModalDeployment.stop() has an inverted poll() check and only
             # terminates sandboxes that have *already* exited, so a live sandbox
@@ -308,7 +441,16 @@ class Environment:
         asyncio.run(_stop())
 
     def tunnel_url(self, port: int) -> str:
-        """Return the public URL for a port forwarded when the sandbox started."""
+        """Return the public URL for a port forwarded when the sandbox started.
+
+        Raises:
+            NotImplementedError: On a Docker sandbox, which has no Modal tunnels.
+        """
+        if self.sandbox == "docker":
+            raise NotImplementedError(
+                "tunnel_url is only available for sandbox='modal'; Docker sandboxes "
+                "have no Modal tunnels."
+            )
 
         async def _tunnel_url() -> str:
             tunnels = await self.deployment.sandbox.tunnels.aio()

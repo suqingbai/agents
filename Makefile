@@ -1,4 +1,4 @@
-.PHONY: setup doctor verify-sources test test-modal test-chess-modal check-part1 check-swebench \
+.PHONY: setup doctor verify-sources test test-modal test-docker test-chess-modal check-part1 check-swebench \
 	run-code-agent run-swebench-agent run-chess-agent \
 	run-obs-experiment-no-legal-moves run-obs-experiment-legal-moves \
 	run-obs-deepseek-no-legal run-obs-deepseek-legal \
@@ -48,6 +48,10 @@ test:
 # Slow and billable: launches real Modal sandboxes.
 test-modal:
 	uv run pytest -m modal
+
+# Slow: starts real containers on the local Docker daemon.
+test-docker:
+	uv run pytest -m docker
 
 test-chess-modal:
 	uv run pytest -m modal tests/test_chess_sandbox.py
