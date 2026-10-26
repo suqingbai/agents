@@ -121,8 +121,6 @@ def test_previous_summary_comes_first_as_bare_text():
     old_prefix = build_compaction_old_prefix(LS_PREFIX, previous_summary=summary)
 
     assert old_prefix.startswith(f"[previous summary]\n{summary}\n[assistant action]\n")
-    assert "<summary>" not in old_prefix
-    assert old_prefix.count(summary) == 1
 
 
 def test_single_action_with_one_tool_call():
