@@ -71,6 +71,21 @@ COMPACTION_USER_PROMPT_TEMPLATE = """\
 Write the working-memory summary of the old prefix above, using the required sections."""
 
 
+def build_compaction_old_prefix(
+    old_prefix: list[dict], previous_summary: str | None = None
+) -> str:
+    """Serialize old agent messages as the text between the <old_prefix> tags.
+
+    The text opens with "[previous summary]" and the summary when one is given,
+    then lists each assistant message as "[assistant action]" and its text,
+    followed by "[tool call] {name} {arguments}" and "[tool observation]" with
+    that call's tool message content, paired by tool_call_id in call order.
+    Lines are joined with newlines, with no leading or trailing newline.
+    """
+
+    raise NotImplementedError
+
+
 class StepLimitError(Exception):
     """Raised when an agent exhausts its model-call budget."""
 

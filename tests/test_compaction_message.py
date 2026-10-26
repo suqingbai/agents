@@ -9,16 +9,12 @@ import json
 
 import pytest
 
-from assignment.agent import base
-from assignment.agent.base import COMPACTION_USER_PROMPT_TEMPLATE
+from assignment.agent.base import (
+    COMPACTION_USER_PROMPT_TEMPLATE,
+    build_compaction_old_prefix,
+)
 
 TASK = "print hello, world to the terminal"
-
-
-def build_compaction_old_prefix(*args, **kwargs):
-    # Looked up at call time, so a missing function fails each test on its own
-    # rather than aborting collection of the whole suite.
-    return base.build_compaction_old_prefix(*args, **kwargs)
 
 
 def make_call(call_id: str, name: str, arguments: dict) -> dict:
