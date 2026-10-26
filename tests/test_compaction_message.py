@@ -7,6 +7,8 @@ described by `COMPACTION_USER_PROMPT_TEMPLATE`.
 
 import json
 
+import pytest
+
 from assignment.agent import base
 
 TASK = "print hello, world to the terminal"
@@ -56,9 +58,7 @@ def test_exact_message_with_task_and_previous_summary():
     ]
 
     message = build_compaction_user_message(
-        old_prefix,
-        previous_summary="## Objective\nPrint hello, world.",
-        original_task=TASK,
+        old_prefix, TASK, previous_summary="## Objective\nPrint hello, world."
     )
 
     assert message == (
@@ -80,16 +80,20 @@ def test_exact_message_with_task_and_previous_summary():
     )
 
 
-def test_exact_message_for_first_compaction_without_task():
-    """No task and no previous summary: both are left out entirely."""
+def test_exact_message_for_first_compaction():
+    """No previous summary: its line is left out entirely."""
     old_prefix = [
         make_action("List the repository to find the script.", LS_CALL),
         make_observation("call_ls", LS_OUTPUT),
     ]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert message == (
+        "<task_context>\n"
+        "print hello, world to the terminal\n"
+        "</task_context>\n"
+        "\n"
         "<old_prefix>\n"
         "[assistant action]\n"
         "List the repository to find the script.\n"
@@ -105,27 +109,25 @@ def test_exact_message_for_first_compaction_without_task():
 def test_task_context_holds_the_original_task():
     old_prefix = [make_action("Look around.", LS_CALL), make_observation("call_ls", LS_OUTPUT)]
 
-    message = build_compaction_user_message(old_prefix, original_task=TASK)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert message.startswith(f"<task_context>\n{TASK}\n</task_context>\n\n<old_prefix>\n")
 
 
-def test_task_context_block_is_omitted_without_a_task():
-    """No task means no block at all, never an empty one."""
+@pytest.mark.parametrize("task", ["", "   ", "\n\t "])
+def test_empty_original_task_is_rejected(task):
+    """The task context is mandatory, so a blank task is an error."""
     old_prefix = [make_action("Look around.", LS_CALL), make_observation("call_ls", LS_OUTPUT)]
 
-    for missing in (None, ""):
-        message = build_compaction_user_message(old_prefix, original_task=missing)
-
-        assert "task_context" not in message
-        assert message.startswith("<old_prefix>\n")
+    with pytest.raises(ValueError):
+        build_compaction_user_message(old_prefix, task)
 
 
 def test_first_compaction_has_no_previous_summary_line():
     old_prefix = [make_action("Look around.", LS_CALL), make_observation("call_ls", LS_OUTPUT)]
 
     for missing in (None, ""):
-        message = build_compaction_user_message(old_prefix, previous_summary=missing)
+        message = build_compaction_user_message(old_prefix, TASK, previous_summary=missing)
 
         assert "[previous summary]" not in message
         assert "<old_prefix>\n[assistant action]\n" in message
@@ -136,7 +138,7 @@ def test_previous_summary_comes_first_as_bare_text():
     summary = "## Objective\nPrint hello, world.\n## Blockers\nnone"
     old_prefix = [make_action("Look around.", LS_CALL), make_observation("call_ls", LS_OUTPUT)]
 
-    message = build_compaction_user_message(old_prefix, previous_summary=summary)
+    message = build_compaction_user_message(old_prefix, TASK, previous_summary=summary)
 
     assert f"<old_prefix>\n[previous summary]\n{summary}\n[assistant action]\n" in message
     assert "<summary>" not in message
@@ -149,7 +151,7 @@ def test_single_action_with_one_tool_call():
         make_observation("call_run", "<output>hello, world\n</output>\n<returncode>0</returncode>"),
     ]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert (
         "<old_prefix>\n"
@@ -177,7 +179,7 @@ def test_multiple_tool_calls_are_each_followed_by_their_own_observation():
         make_observation("call_b", "B CONTENT"),
     ]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert (
         "[assistant action]\n"
@@ -203,7 +205,7 @@ def test_several_actions_keep_their_original_order():
         make_observation("call_run", "hello, world"),
     ]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert (
         "[assistant action]\n"
@@ -228,7 +230,7 @@ def test_assistant_action_without_tool_calls():
         make_observation("call_ls", LS_OUTPUT),
     ]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert (
         "<old_prefix>\n"
@@ -245,7 +247,7 @@ def test_tool_output_is_used_as_is():
     long_output = "x" * 9_000 + "\n[1000 characters elided; read a narrower range]\n" + "y" * 900
     old_prefix = [make_action("Read it.", LS_CALL), make_observation("call_ls", long_output)]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert f"[tool observation]\n{long_output}\n</old_prefix>" in message
 
@@ -253,7 +255,7 @@ def test_tool_output_is_used_as_is():
 def test_old_prefix_is_plain_text_not_role_messages():
     old_prefix = [make_action("Look around.", LS_CALL), make_observation("call_ls", LS_OUTPUT)]
 
-    message = build_compaction_user_message(old_prefix)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert isinstance(message, str)
     assert '"role"' not in message
@@ -269,7 +271,7 @@ def test_system_and_task_messages_are_not_included():
         make_observation("call_ls", LS_OUTPUT),
     ]
 
-    message = build_compaction_user_message(old_prefix, original_task=TASK)
+    message = build_compaction_user_message(old_prefix, TASK)
 
     assert "SYSTEM PROMPT TEXT" not in message
     assert "TASK PROMPT TEXT" not in message
