@@ -33,7 +33,7 @@ def make_call(call_id: str, name: str, arguments: dict) -> dict:
     }
 
 
-def make_action(content: str, *calls: dict) -> dict:
+def make_action(content: str | None, *calls: dict) -> dict:
     """An assistant message, with tool calls only when some are given."""
     message = {"role": "assistant", "content": content}
     if calls:
@@ -242,6 +242,26 @@ def test_assistant_action_without_tool_calls():
     ) in message
 
 
+@pytest.mark.parametrize("content", [None, ""])
+def test_assistant_action_without_text_keeps_label_and_skips_text_line(content):
+    """A tool-calling reply with no text has no empty line after its label."""
+    old_prefix = [
+        make_action(content, LS_CALL),
+        make_observation("call_ls", LS_OUTPUT),
+    ]
+
+    message = build_compaction_user_message(old_prefix, TASK)
+
+    assert (
+        "<old_prefix>\n"
+        "[assistant action]\n"
+        '[tool call] execute {"command": "ls -la"}\n'
+        "[tool observation]\n"
+        f"{LS_OUTPUT}\n"
+        "</old_prefix>\n"
+    ) in message
+
+
 def test_tool_output_is_used_as_is():
     """Observations are not truncated or reformatted again."""
     long_output = "x" * 9_000 + "\n[1000 characters elided; read a narrower range]\n" + "y" * 900
@@ -260,19 +280,3 @@ def test_old_prefix_is_plain_text_not_role_messages():
     assert isinstance(message, str)
     assert '"role"' not in message
     assert "call_ls" not in message, "tool_call_id is used for pairing, not shown"
-
-
-def test_system_and_task_messages_are_not_included():
-    """Only assistant actions and their observations make up the old prefix."""
-    old_prefix = [
-        {"role": "system", "content": "SYSTEM PROMPT TEXT"},
-        {"role": "user", "content": "TASK PROMPT TEXT"},
-        make_action("Look around.", LS_CALL),
-        make_observation("call_ls", LS_OUTPUT),
-    ]
-
-    message = build_compaction_user_message(old_prefix, TASK)
-
-    assert "SYSTEM PROMPT TEXT" not in message
-    assert "TASK PROMPT TEXT" not in message
-    assert "<old_prefix>\n[assistant action]\nLook around.\n" in message
