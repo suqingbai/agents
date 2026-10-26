@@ -65,14 +65,7 @@ COMPACTION_USER_PROMPT_TEMPLATE = """\
 </task_context>
 
 <old_prefix>
-[previous summary]
-{previous_summary}
-[assistant action]
-{assistant_text}
-[tool call] {tool_name} {tool_args_json}
-[tool observation]
-{tool_output}
-...
+{old_prefix}
 </old_prefix>
 
 Write the working-memory summary of the old prefix above, using the required sections."""
