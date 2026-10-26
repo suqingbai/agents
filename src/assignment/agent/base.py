@@ -83,7 +83,26 @@ def build_compaction_old_prefix(
     Lines are joined with newlines, with no leading or trailing newline.
     """
 
-    raise NotImplementedError
+    observations = {
+        message["tool_call_id"]: message.get("content") or ""
+        for message in old_prefix
+        if message.get("role") == "tool"
+    }
+
+    lines: list[str] = []
+    if previous_summary:
+        lines += ["[previous summary]", previous_summary]
+    for message in old_prefix:
+        if message.get("role") != "assistant":
+            continue
+        lines.append("[assistant action]")
+        if message.get("content"):
+            lines.append(message["content"])
+        for call in message.get("tool_calls", []):
+            function = call["function"]
+            lines.append(f"[tool call] {function['name']} {function['arguments']}")
+            lines += ["[tool observation]", observations.get(call["id"], "")]
+    return "\n".join(lines)
 
 
 class StepLimitError(Exception):
