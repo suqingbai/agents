@@ -429,9 +429,26 @@ class Agent:
         # with all linked tool observations. The resulting summary should change
         # what `build_prompt` emits, and reduce the length of the prompt.
 
-        raise NotImplementedError
+        # A step starts at an assistant message and runs through its tool
+        # observations, so the kept suffix starts at the Nth-from-last one.
+        step_starts = [
+            index
+            for index, message in enumerate(self.agent_state)
+            if message.get("role") == "assistant"
+        ]
+        keep_from = step_starts[-self.compaction_keep_recent_steps]
+        old_prefix = self.agent_state[:keep_from]
 
-        compaction_prompt = []
+        compaction_prompt = [
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": COMPACTION_USER_PROMPT_TEMPLATE.format(
+                    original_task=self.task_prompt,
+                    old_prefix=build_compaction_old_prefix(old_prefix),
+                ),
+            },
+        ]
 
         ### Do not modify this section ###
         compaction_response = self.client.chat.completions.create(
