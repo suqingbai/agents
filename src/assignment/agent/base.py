@@ -59,6 +59,7 @@ Write a concise, factual working memory that replaces the old prefix. If there i
 ## Blockers
 
 Output only the summary."""
+
 COMPACTION_USER_PROMPT_TEMPLATE = """\
 <task_context>
 {original_task}
@@ -69,6 +70,12 @@ COMPACTION_USER_PROMPT_TEMPLATE = """\
 </old_prefix>
 
 Write the working-memory summary of the old prefix above, using the required sections."""
+
+COMPACTION_SUMMARY_MESSAGE_TEMPLATE = """\
+Earlier steps of this task were compacted to save context. This summary of them replaces the removed messages:
+<summary>
+{summary}
+</summary>"""
 
 
 def build_compaction_old_prefix(
@@ -237,6 +244,8 @@ class Agent:
             self.tools.append(INVOKE_SKILL_TOOL)
 
         self.agent_state: list[dict[str, Any]] = []
+        # Working memory of the steps compacted out of agent_state, if any.
+        self.compaction_summary: str | None = None
 
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
         """Load the skill folders exposed to this agent."""
@@ -384,6 +393,15 @@ class Agent:
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": self.task_prompt},
         ]
+        if self.compaction_summary:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": COMPACTION_SUMMARY_MESSAGE_TEMPLATE.format(
+                        summary=self.compaction_summary
+                    ),
+                }
+            )
 
         # Each entry in agent_state is a dict whose value is the already-shaped message (including its own
         # "role" field). Append them in the order they occurred so
@@ -420,15 +438,6 @@ class Agent:
         """Replace parts of prompt with model-generated working memory. Changes the
         content that `build_prompt` emits."""
 
-        # TODO(2.1): Prompt the model to compact the context. The system
-        # prompt should ask for concise factual working memory and preserve
-        # the objective, constraints, files, commands, edits, concrete
-        # results, failed approaches, tests, blockers, and next action.
-        # Summarize only an old prefix; retain the original system/task
-        # messages verbatim and at least the latest complete assistant action
-        # with all linked tool observations. The resulting summary should change
-        # what `build_prompt` emits, and reduce the length of the prompt.
-
         # A step starts at an assistant message and runs through its tool
         # observations, so the kept suffix starts at the Nth-from-last one.
         step_starts = [
@@ -445,7 +454,9 @@ class Agent:
                 "role": "user",
                 "content": COMPACTION_USER_PROMPT_TEMPLATE.format(
                     original_task=self.task_prompt,
-                    old_prefix=build_compaction_old_prefix(old_prefix),
+                    old_prefix=build_compaction_old_prefix(
+                        old_prefix, previous_summary=self.compaction_summary
+                    ),
                 ),
             },
         ]
@@ -461,6 +472,9 @@ class Agent:
 
         # Use `compaction_response` to update what `build_prompt` emits, but
         # DO NOT modify the object itself. Let the method return it unchanged.
+        # The new summary already merges any earlier one, so it replaces it.
+        self.compaction_summary = compaction_response.choices[0].message.content or ""
+        self.agent_state = self.agent_state[keep_from:]
 
         ### Do not modify this section ###
         return compaction_prompt, compaction_response.model_dump(mode="json")
@@ -510,15 +524,11 @@ class Agent:
                     raise StepLimitError(
                         f"Step limit of {self.step_limit} reached without finishing."
                     )
+                self.maybe_compact_context()
                 response = self.query_language_model()
                 if response.get("tool_calls"):
                     observations = self.execute_tool_calls(response["tool_calls"])
                     self.agent_state.extend(observations)
-
-            # TODO(2.2) Call `maybe_compact_context()` before each new action
-            # request in your shared loop. It already estimates active tokens
-            # and handles the threshold, and tracks compaction events for
-            # logging.
 
         finally:
             # This block is provided infrastructure. Do not modify it: a
