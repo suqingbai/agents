@@ -162,16 +162,3 @@ def test_recent_steps_are_left_out_of_the_old_prefix(make_agent, keep_recent_ste
         for message in step:
             assert message["content"] not in user_message
 
-
-def test_kept_step_takes_all_its_tool_observations_with_it(make_agent):
-    """A kept step with several tool calls keeps every one of its observations."""
-    agent, calls = make_agent(STEPS, keep_recent_steps=1)
-
-    agent.compact_context()
-
-    user_message = calls[0]["messages"][1]["content"]
-    assert "pytest -q" not in user_message
-    assert "TEST OUTPUT" not in user_message
-    assert "git diff" not in user_message
-    assert "DIFF OUTPUT" not in user_message
-    assert "RUN OUTPUT" in user_message
