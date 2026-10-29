@@ -43,8 +43,6 @@ CODE_AGENT_SYSTEM_PROMPT_TEMPLATE = Template(
 - You may make several independent tool calls in one response; they run in the order given.
 - {{ step_budget_rule }} Prefer commands that answer several questions at once.
 - If the issue is ambiguous, choose the most reasonable reading and say so in your final message; do not stop to ask.
-{% if compaction_rule %}- {{ compaction_rule }}
-{% endif %}
 {%- if skills_prompt %}
 {{ skills_prompt }}
 {%- endif %}
@@ -100,9 +98,6 @@ class CodeAgent(Agent):
             cwd=environment.cwd,
             tool_use_rule=TOOL_USE_RULE,
             step_budget_rule=self.step_budget_rule(),
-            compaction_rule=self.compaction_rule(
-                "re-read a file when you need its exact current contents"
-            ),
             skills_prompt=self.skills_prompt(),
         )
         self.task_prompt = CODE_AGENT_TASK_PROMPT_TEMPLATE.render(
